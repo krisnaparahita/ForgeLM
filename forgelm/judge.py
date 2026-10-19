@@ -198,22 +198,67 @@ def _validate_rubric(rubric: str) -> Optional[str]:
     return None
 
 
+def _reject_duplicate_keys(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    """``object_pairs_hook`` that refuses repeated keys (``json.loads`` keeps the last silently)."""
+    obj: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"duplicate key {key!r} in judge JSON")
+        obj[key] = value
+    return obj
+
+
+def _scan_score_objects(text: str) -> List[Dict[str, Any]]:
+    """Return every top-level JSON object in ``text`` that carries a ``score`` key.
+
+    Scans with ``raw_decode`` so objects are found whether fenced, unfenced, or
+    surrounded by prose. Nested objects are not reported separately; objects
+    with duplicate keys are skipped.
+    """
+    decoder = json.JSONDecoder(object_pairs_hook=_reject_duplicate_keys)
+    found: List[Dict[str, Any]] = []
+    pos = text.find("{")
+    while pos != -1:
+        try:
+            obj, end = decoder.raw_decode(text, pos)
+        except ValueError:
+            pos = text.find("{", pos + 1)
+            continue
+        if isinstance(obj, dict) and "score" in obj:
+            found.append(obj)
+        pos = text.find("{", end)
+    return found
+
+
 def _parse_judge_json(text: str) -> Dict[str, Any]:
-    """Safely parse judge response JSON, handling common LLM output quirks."""
+    """Safely parse judge response JSON, failing closed on ambiguity.
+
+    The judged model's response is embedded in the judge prompt, so a judge that
+    quotes it can emit a planted ``{"score": ...}`` block next to its own verdict.
+    The parser therefore never picks "the first block that parses": the whole
+    reply must be a single JSON object, or exactly one distinct score-bearing
+    object must be found in it. Conflicting candidates, duplicate keys and
+    non-object values all yield the ``score=None`` failure sentinel.
+    """
     text = text.strip()
-    # Try direct parse first
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
+        whole = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+        if isinstance(whole, dict):
+            return whole
+    except ValueError:
         pass
-    # Try extracting JSON from markdown code block
-    if "```" in text:
-        for block in text.split("```"):
-            block = block.strip().removeprefix("json").strip()
-            try:
-                return json.loads(block)
-            except json.JSONDecodeError:
-                continue
+    candidates = _scan_score_objects(text)
+    distinct = []
+    for cand in candidates:
+        if cand not in distinct:
+            distinct.append(cand)
+    if len(distinct) == 1:
+        return distinct[0]
+    if len(distinct) > 1:
+        logger.warning(
+            "Ambiguous judge response: %d conflicting score objects found; treating as unscored.", len(distinct)
+        )
+        return {"score": None, "reason": "Ambiguous judge response: multiple conflicting score objects."}
     logger.warning("Could not parse judge response as JSON (length=%d chars).", len(text))
     # Use score=None as the failure sentinel — score=0 used to be clipped up
     # to 1.0 by _clip_judge_score and silently lowered the average.
