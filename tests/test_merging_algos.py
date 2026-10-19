@@ -646,6 +646,37 @@ class TestSlerpMergeExercisesRealFunction:
         assert torch.isfinite(merged).all(), "anti-parallel SLERP must not yield NaN/Inf"
         assert torch.allclose(merged, torch.zeros(4), atol=1e-5)
 
+    def test_state_a_not_aliased_to_base_storage(self, monkeypatch):
+        """CR-A13-001: like real PEFT, merge_and_unload() merges in place and
+        returns the base model, so its state_dict aliases the live parameters.
+        The SLERP of two distinct adapters must not collapse to the second one."""
+        import sys
+        import types
+
+        from forgelm.merging import _slerp_merge
+
+        base = torch.nn.Linear(2, 1, bias=False)
+        with torch.no_grad():
+            base.weight.zero_()
+        deltas = iter([torch.tensor([[1.0, 0.0]]), torch.tensor([[0.0, 1.0]])])
+
+        class _InPlaceAdapter:
+            def __init__(self, model):
+                self.model = model
+
+            def merge_and_unload(self):
+                with torch.no_grad():
+                    self.model.weight.add_(next(deltas))
+                return self.model
+
+        fake_peft = types.ModuleType("peft")
+        fake_peft.PeftModel = type("PeftModel", (), {"from_pretrained": staticmethod(lambda m, p: _InPlaceAdapter(m))})
+        monkeypatch.setitem(sys.modules, "peft", fake_peft)
+
+        _slerp_merge(base, [{"path": "a", "weight": 1.0}, {"path": "b", "weight": 1.0}])
+        # Orthogonal unit deltas at t=0.5 -> sin(pi/4) on each axis; the bug yielded [0, 1].
+        assert torch.allclose(base.weight.detach(), torch.full((1, 2), 0.70710678), atol=1e-5)
+
     def test_orthogonal_uses_true_slerp(self, monkeypatch):
         """Orthogonal unit vectors at t=0.5 → SLERP gives sin(π/4)≈0.7071 on
         each axis (NOT the linear 0.5), proving the SLERP branch executed."""

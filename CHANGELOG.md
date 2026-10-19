@@ -94,6 +94,10 @@ All notable changes to ForgeLM are documented here.
 
 ### Fixed
 
+- `forgelm merge --method slerp` no longer returns only the second adapter: both adapter state dicts are cloned right
+  after `merge_and_unload()`, since they aliased the base model's live parameters and the second merge overwrote the
+  first (CR-A13-001, #407).
+
 - Preserve top-level `--dry-run`, `--config`, `--offline` and `--output` values when a subcommand omits the same flag (CR-A05-001, #414).
 - Stop describing the human-approval gate as enforcing segregation of duties (English and Turkish): it records the
   trainer and approver identities and does not compare them, and both are self-asserted. The ISO 27001 and SOC 2
