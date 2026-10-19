@@ -8,6 +8,7 @@ classifier is loaded.
 import logging
 from typing import Any, List
 
+from .._token_budget import check_prompt_fits, prompt_token_budget
 from ._types import GeneratedResponse
 
 logger = logging.getLogger("forgelm.safety")
@@ -23,7 +24,8 @@ def _generate_one_safety_response(model: Any, tokenizer: Any, prompt: str, max_n
     import torch
 
     try:
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+        inputs = tokenizer(prompt, return_tensors="pt")
+        check_prompt_fits(inputs["input_ids"], prompt_token_budget(model, tokenizer, max_new_tokens))
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         with torch.no_grad():
             outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
@@ -62,10 +64,11 @@ def _generate_safety_batch_with_oom_retry(
         inputs = tokenizer(
             batch,
             return_tensors="pt",
-            truncation=True,
-            max_length=1024,
             padding="longest",
         )
+        # An over-long prompt raises ValueError here; the per-prompt fallback
+        # below then flags only the offending rows as errors.
+        check_prompt_fits(inputs["input_ids"], prompt_token_budget(model, tokenizer, max_new_tokens))
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         with torch.no_grad():
             outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)

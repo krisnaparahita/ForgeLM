@@ -94,6 +94,12 @@ All notable changes to ForgeLM are documented here.
 
 ### Fixed
 
+- Safety gate and LLM judge no longer right-truncate the prompt under test at a hard-coded 1024
+  tokens (CR-A06-011). The budget is now the model's context length minus `max_new_tokens`; a prompt
+  that does not fit fails closed — the safety row is reported as a generation error and the judge row
+  is marked `judge_failed` (`prompt_exceeds_token_budget`) — instead of being scored on a clipped probe.
+  When the model exposes no context length the previous 1024-token budget is used, with a warning.
+
 - Preserve top-level `--dry-run`, `--config`, `--offline` and `--output` values when a subcommand omits the same flag (CR-A05-001, #414).
 - Stop describing the human-approval gate as enforcing segregation of duties (English and Turkish): it records the
   trainer and approver identities and does not compare them, and both are self-asserted. The ISO 27001 and SOC 2

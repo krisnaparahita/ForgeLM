@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from ._strict_json import dumps_strict
+from ._token_budget import PromptTooLongError, check_prompt_fits, prompt_token_budget
 
 # Re-export: the local-judge role constant is declared beside the other five
 # roles in ``forgelm.model`` (one registry, one key space, one file to check
@@ -381,16 +382,25 @@ def _load_local_judge(judge_model: str, judge_model_revision: Optional[str] = No
     return mdl, tok
 
 
-def _generate_response(model: Any, tokenizer: Any, prompt: str, max_new_tokens: int) -> str:
-    """Generate a single response from the fine-tuned model under evaluation."""
+def _generate_response(model: Any, tokenizer: Any, prompt: str, max_new_tokens: int) -> Optional[str]:
+    """Generate a single response from the fine-tuned model under evaluation.
+
+    Returns ``None`` (not ``""``) when the prompt does not fit the model's
+    context window, so the caller can mark the row ``judge_failed`` instead of
+    scoring a response to a prompt the model never fully saw.
+    """
     import torch as _torch
 
     try:
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+        inputs = tokenizer(prompt, return_tensors="pt")
+        check_prompt_fits(inputs["input_ids"], prompt_token_budget(model, tokenizer, max_new_tokens))
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         with _torch.no_grad():
             outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
         return tokenizer.decode(outputs[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
+    except PromptTooLongError as e:
+        logger.warning("Skipping judge row: %s", e)
+        return None
     except (RuntimeError, ValueError, TypeError, IndexError, KeyError) as e:
         # Tokenizer + generate boundary. RuntimeError covers CUDA OOM /
         # driver errors, ValueError/TypeError cover bad-shape inputs,
@@ -407,7 +417,7 @@ def _generate_batch_with_oom_retry(
     batch: List[str],
     batch_start: int,
     max_new_tokens: int,
-) -> List[str]:
+) -> List[Optional[str]]:
     """Run one batch; on CUDA OOM or any other generation error fall back to per-prompt.
 
     Extracted from ``_generate_responses_batched`` to keep the outer loop
@@ -420,10 +430,9 @@ def _generate_batch_with_oom_retry(
         inputs = tokenizer(
             batch,
             return_tensors="pt",
-            truncation=True,
-            max_length=1024,
             padding="longest",
         )
+        check_prompt_fits(inputs["input_ids"], prompt_token_budget(model, tokenizer, max_new_tokens))
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         with torch.no_grad():
             outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
@@ -460,7 +469,7 @@ def _generate_responses_batched(
     prompts: List[str],
     max_new_tokens: int,
     batch_size: int = 8,
-) -> List[str]:
+) -> List[Optional[str]]:
     """Batched fine-tuned-model generation for the judge eval set.
 
     Pads to longest in the batch (left-padded for decoder-only generation)
@@ -473,7 +482,7 @@ def _generate_responses_batched(
     original_padding_side = getattr(tokenizer, "padding_side", "right")
     tokenizer.padding_side = "left"
 
-    responses: List[str] = []
+    responses: List[Optional[str]] = []
     try:
         for batch_start in range(0, len(prompts), batch_size):
             batch = prompts[batch_start : batch_start + batch_size]
@@ -735,6 +744,22 @@ def _score_eval_prompts(
     responses = _generate_responses_batched(model, tokenizer, eval_prompts, max_new_tokens, batch_size=batch_size)
 
     for prompt, response in zip(eval_prompts, responses):
+        if response is None:
+            # Prompt exceeded the model's token budget (not generated, not
+            # truncated). Count it as a judge failure so it is visible in the
+            # result and cannot silently pass.
+            failure_count += 1
+            scores.append(None)
+            details.append(
+                {
+                    "prompt": prompt[:200],
+                    "response": "",
+                    "score": None,
+                    "reason": "prompt_exceeds_token_budget",
+                    "judge_failed": True,
+                }
+            )
+            continue
         # Bounded, documented char budgets (F-P3-FABLE-57). Warn once if any
         # row is actually trimmed so the operator knows scores are computed on a
         # fragment — long-form answers can otherwise be penalised for looking

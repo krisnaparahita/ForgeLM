@@ -880,6 +880,8 @@ class TestOOMFallbackCacheClearLogging:
         from forgelm import safety as _safety
 
         class _FakeTensor:
+            shape = (1, 4)
+
             def to(self, *a, **k):
                 return self
 
@@ -2245,3 +2247,79 @@ class TestGuardProtocolGateIsRatioBasedNotPresenceBased:
 
         assert _evaluate_guard_protocol(unscored_count=1, total=100) is None
         assert _evaluate_guard_protocol(unscored_count=49, total=100) is None
+
+
+class _FakeIds:
+    """Minimal stand-in for an ``input_ids`` tensor: only ``shape`` and ``to``."""
+
+    def __init__(self, length):
+        self.shape = (1, length)
+
+    def to(self, _device):
+        return self
+
+
+class _LengthTokenizer:
+    """Fake tokenizer: one token per whitespace-separated word, never truncates."""
+
+    pad_token = "<pad>"
+    padding_side = "right"
+    model_max_length = 64
+
+    def __call__(self, text, **kwargs):
+        assert "truncation" not in kwargs, "prompts must not be silently truncated"
+        texts = text if isinstance(text, list) else [text]
+        return {"input_ids": _FakeIds(max(len(t.split()) for t in texts))}
+
+    def decode(self, ids, **kwargs):
+        return "answer"
+
+
+class _FakeModel:
+    device = "cpu"
+
+    class config:  # noqa: N801 — mimics HF ``model.config``
+        max_position_embeddings = 64
+
+    def generate(self, **kwargs):
+        return [_GenRow()]
+
+
+class _GenRow:
+    def __getitem__(self, _item):
+        return self
+
+
+class TestPromptTokenBudget:
+    """Over-long prompts fail closed instead of losing their tail (CR-A06-011)."""
+
+    def test_prompt_within_budget_is_generated(self):
+        from forgelm.safety import _generate_one_safety_response
+
+        result = _generate_one_safety_response(_FakeModel(), _LengthTokenizer(), "word " * 20, 16)
+        assert result.failed is False
+        assert result.text == "answer"
+
+    def test_over_long_prompt_is_reported_not_truncated(self):
+        from forgelm.safety import _generate_one_safety_response
+
+        # 64-token window - 16 new tokens = 48-token budget; 60 tokens do not fit.
+        result = _generate_one_safety_response(_FakeModel(), _LengthTokenizer(), "word " * 60, 16)
+        assert result.failed is True
+        assert "budget" in result.error
+
+    def test_batch_flags_only_the_over_long_row(self):
+        from forgelm.safety import _generate_safety_batch_with_oom_retry
+
+        out = _generate_safety_batch_with_oom_retry(
+            _FakeModel(), _LengthTokenizer(), ["word " * 5, "word " * 60], 0, 16
+        )
+        assert [r.failed for r in out] == [False, True]
+
+    def test_budget_falls_back_when_model_reports_no_length(self):
+        from forgelm._token_budget import FALLBACK_PROMPT_TOKEN_BUDGET, prompt_token_budget
+
+        class _NoLen:
+            model_max_length = int(1e30)
+
+        assert prompt_token_budget(_NoLen(), _NoLen(), 16) == FALLBACK_PROMPT_TOKEN_BUDGET

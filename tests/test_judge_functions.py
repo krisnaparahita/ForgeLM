@@ -1180,3 +1180,54 @@ class TestEmptyEvalDatasetFailsClosed:
         """No prompts means no spend — and no chance of a partial verdict."""
         self._run(tmp_path, "")
         mock_post.assert_not_called()
+
+
+class TestJudgePromptTokenBudget:
+    """Over-long eval prompts become ``judge_failed`` rows, not truncated ones (CR-A06-011)."""
+
+    def _tok_model(self):
+        from tests.test_safety_advanced import _FakeModel, _LengthTokenizer
+
+        return _FakeModel(), _LengthTokenizer()
+
+    def test_within_budget_prompt_returns_text(self):
+        from forgelm import judge
+
+        model, tok = self._tok_model()
+        assert judge._generate_response(model, tok, "word " * 20, 16) == "answer"
+
+    def test_over_long_prompt_returns_none(self):
+        from forgelm import judge
+
+        model, tok = self._tok_model()
+        assert judge._generate_response(model, tok, "word " * 60, 16) is None
+
+    def test_batch_falls_back_per_row_and_marks_only_long_row(self):
+        from forgelm import judge
+
+        model, tok = self._tok_model()
+        out = judge._generate_batch_with_oom_retry(model, tok, ["word " * 5, "word " * 60], 0, 16)
+        assert out == ["answer", None]
+
+    def test_none_response_is_a_visible_judge_failure(self, monkeypatch):
+        from forgelm import judge
+
+        monkeypatch.setattr(judge, "_generate_responses_batched", lambda *a, **k: [None])
+        monkeypatch.setattr(judge, "_call_api_judge", lambda *a, **k: pytest.fail("judge must not be called"))
+        scores, details, failures = judge._score_eval_prompts(
+            model=None,
+            tokenizer=None,
+            eval_prompts=["long prompt"],
+            rubric="{prompt} {response}",
+            max_new_tokens=16,
+            is_api_judge=True,
+            judge_api_key="k",
+            judge_model="m",
+            api_base=None,
+            local_judge_model=None,
+            local_judge_tokenizer=None,
+        )
+        assert scores == [None]
+        assert failures == 1
+        assert details[0]["judge_failed"] is True
+        assert details[0]["reason"] == "prompt_exceeds_token_budget"

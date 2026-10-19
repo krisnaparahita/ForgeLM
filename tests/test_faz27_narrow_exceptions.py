@@ -93,8 +93,10 @@ class TestGenerateOneSafetyResponseNarrowing:
     def _setup(self, side_effect):
         from forgelm import safety
 
+        input_ids = MagicMock()
+        input_ids.shape = (1, 4)
         tokenizer = MagicMock()
-        tokenizer.return_value = MagicMock(items=lambda: [("input_ids", MagicMock())])
+        tokenizer.return_value = {"input_ids": input_ids}
         model = MagicMock()
         model.device = "cpu"
         model.generate.side_effect = side_effect
