@@ -94,6 +94,10 @@ All notable changes to ForgeLM are documented here.
 
 ### Fixed
 
+- The default generative Llama-Guard scorer no longer crashes on transformers 5.x: `_generate_guard_verdict` passes
+  `return_dict=False` to `apply_chat_template` (5.x returns a `BatchEncoding`, which `generate()` rejected with a bare
+  `AttributeError`), treats `AttributeError` as a per-pair fail-closed error, and logs the exception type (CR-A06-003, #108).
+
 - Preserve top-level `--dry-run`, `--config`, `--offline` and `--output` values when a subcommand omits the same flag (CR-A05-001, #414).
 - Stop describing the human-approval gate as enforcing segregation of duties (English and Turkish): it records the
   trainer and approver identities and does not compare them, and both are self-asserted. The ISO 27001 and SOC 2

@@ -143,6 +143,7 @@ def _generate_guard_verdict(
         input_ids = tokenizer.apply_chat_template(
             conversation,
             return_tensors="pt",
+            return_dict=False,  # transformers>=5 defaults to a BatchEncoding, which generate() rejects as input_ids
             truncation=True,
             max_length=_GUARD_VERDICT_MAX_INPUT_TOKENS,
         )
@@ -159,12 +160,13 @@ def _generate_guard_verdict(
             # CUDA driver is non-fatal but must be logged, not swallowed.
             logger.warning("Could not empty CUDA cache after Llama-Guard OOM: %s", cache_exc)
         return ""
-    except (RuntimeError, ValueError, TypeError, IndexError, KeyError) as e:
-        # Tokenizer / apply_chat_template / generate boundary. RuntimeError
+    except (RuntimeError, ValueError, TypeError, IndexError, KeyError, AttributeError) as e:
+        # Tokenizer / apply_chat_template / generate boundary. AttributeError
+        # covers a tokenizer returning an unexpected type (e.g. BatchEncoding). RuntimeError
         # covers CUDA / device-side asserts below the OOM branch above,
         # ValueError/TypeError cover bad chat-template inputs, IndexError covers
         # empty / oversize sequences, KeyError covers template-var lookups.
-        logger.warning("Failed to generate Llama-Guard verdict: %s", e)
+        logger.warning("Failed to generate Llama-Guard verdict: %s: %s", type(e).__name__, e)
         return ""
 
 

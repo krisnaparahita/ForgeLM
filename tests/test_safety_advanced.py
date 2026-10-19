@@ -1461,6 +1461,48 @@ class TestGenerateGuardVerdict:
         # fail-closed), never propagate and abort the whole run.
         assert _generate_guard_verdict(model, tokenizer, "p", "r") == ""
 
+    def test_real_apply_chat_template_yields_tensor_input_ids(self):
+        """CR-A06-003: use a real (offline) tokenizer so transformers' own
+        apply_chat_template default (BatchEncoding on 5.x) is exercised."""
+        import torch
+
+        pytest.importorskip("tokenizers")
+        from tokenizers import Tokenizer, models, pre_tokenizers
+        from transformers import PreTrainedTokenizerFast
+
+        from forgelm.safety import _generate_guard_verdict
+
+        vocab = {"[UNK]": 0, "hi": 1, "yo": 2}
+        raw = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+        raw.pre_tokenizer = pre_tokenizers.Whitespace()
+        tokenizer = PreTrainedTokenizerFast(tokenizer_object=raw, unk_token="[UNK]")
+        tokenizer.chat_template = "{% for m in messages %}{{ m['content'] }} {% endfor %}"
+
+        seen = {}
+
+        class _Model:
+            device = "cpu"
+
+            def generate(self, input_ids, max_new_tokens, do_sample):
+                seen["input_ids"] = input_ids
+                return torch.cat([input_ids, torch.tensor([[1]])], dim=-1)
+
+        verdict = _generate_guard_verdict(_Model(), tokenizer, "hi", "yo")
+        assert isinstance(seen["input_ids"], torch.Tensor)
+        assert verdict == "hi"
+
+    def test_attribute_error_degrades_to_empty_string(self):
+        import torch
+
+        from forgelm.safety import _generate_guard_verdict
+
+        model = MagicMock()
+        model.device = "cpu"
+        model.generate.side_effect = AttributeError()
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = torch.zeros((1, 4), dtype=torch.long)
+        assert _generate_guard_verdict(model, tokenizer, "p", "r") == ""
+
 
 class TestScoringPathAggregateParity:
     """The two scoring paths must return the same aggregate contract.
