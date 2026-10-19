@@ -94,6 +94,11 @@ All notable changes to ForgeLM are documented here.
 
 ### Fixed
 
+- The API judge sends `max_completion_tokens` to the official OpenAI endpoint and omits `temperature`
+  for reasoning models (`o1`/`o3`/`o4`/`gpt-5` families), which reject `max_tokens` and a fixed
+  temperature with HTTP 400 (CR-A06-051). Custom `judge_api_base` endpoints keep `max_tokens`.
+  `forgelm/synthetic.py` is not changed here.
+
 - Preserve top-level `--dry-run`, `--config`, `--offline` and `--output` values when a subcommand omits the same flag (CR-A05-001, #414).
 - Stop describing the human-approval gate as enforcing segregation of duties (English and Turkish): it records the
   trainer and approver identities and does not compare them, and both are self-asserted. The ISO 27001 and SOC 2

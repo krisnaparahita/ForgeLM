@@ -1180,3 +1180,42 @@ class TestEmptyEvalDatasetFailsClosed:
         """No prompts means no spend — and no chance of a partial verdict."""
         self._run(tmp_path, "")
         mock_post.assert_not_called()
+
+
+class TestJudgePayloadParameters:
+    """Request body adapts to OpenAI's parameter rules (CR-A06-051); no network."""
+
+    def _payload(self, model, url=None):
+        from forgelm import judge
+
+        return judge._build_judge_payload("p", model, url or judge.OPENAI_API_BASE)
+
+    def test_openai_chat_model_uses_max_completion_tokens(self):
+        payload = self._payload("gpt-4o")
+        assert payload["max_completion_tokens"] == 200
+        assert "max_tokens" not in payload
+        assert payload["temperature"] == 0.0
+
+    @pytest.mark.parametrize("model", ["o1-mini", "o3", "o4-mini", "gpt-5", "GPT-5-mini"])
+    def test_reasoning_model_omits_temperature_and_max_tokens(self, model):
+        payload = self._payload(model)
+        assert "temperature" not in payload
+        assert "max_tokens" not in payload
+        assert payload["max_completion_tokens"] > 200
+
+    def test_custom_api_base_keeps_legacy_parameters(self):
+        payload = self._payload("llama-3", url="http://localhost:8000/v1/chat/completions")
+        assert payload["max_tokens"] == 200
+        assert payload["temperature"] == 0.0
+        assert "max_completion_tokens" not in payload
+
+    @patch("forgelm._http.requests.Session.post")
+    def test_call_api_judge_sends_built_payload(self, mock_post):
+        from forgelm import judge
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"choices": [{"message": {"content": '{"score": 7, "reason": "OK"}'}}]}
+        mock_post.return_value = mock_response
+        judge._call_api_judge("p", "key", "o3")
+        sent = mock_post.call_args.kwargs["json"]
+        assert "max_completion_tokens" in sent and "temperature" not in sent

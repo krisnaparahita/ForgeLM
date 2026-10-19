@@ -220,6 +220,31 @@ def _parse_judge_json(text: str) -> Dict[str, Any]:
     return {"score": None, "reason": "Invalid JSON response from judge model."}
 
 
+# OpenAI reasoning-model families reject ``temperature`` and ``max_tokens``.
+_OPENAI_REASONING_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+# Reasoning tokens count against ``max_completion_tokens``; 200 would leave no room for the verdict.
+_JUDGE_MAX_TOKENS = 200
+_JUDGE_REASONING_MAX_TOKENS = 2048
+
+
+def _build_judge_payload(prompt: str, model: str, url: str) -> Dict[str, Any]:
+    """Build the chat-completions body, adapting to OpenAI's current parameter rules.
+
+    Only the official OpenAI endpoint gets ``max_completion_tokens`` (``max_tokens``
+    is deprecated there); a custom ``api_base`` keeps ``max_tokens`` because other
+    OpenAI-compatible servers may not accept the new name.  Reasoning models also
+    reject a fixed ``temperature``, so it is omitted for them.
+    """
+    payload: Dict[str, Any] = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+    if url != OPENAI_API_BASE:
+        payload.update(temperature=0.0, max_tokens=_JUDGE_MAX_TOKENS)
+    elif model.lower().startswith(_OPENAI_REASONING_PREFIXES):
+        payload["max_completion_tokens"] = _JUDGE_REASONING_MAX_TOKENS
+    else:
+        payload.update(temperature=0.0, max_completion_tokens=_JUDGE_MAX_TOKENS)
+    return payload
+
+
 def _call_api_judge(prompt: str, api_key: str, model: str = "gpt-4o", api_base: Optional[str] = None) -> Dict[str, Any]:
     """Call an API-based judge (OpenAI-compatible endpoint).
 
@@ -235,12 +260,7 @@ def _call_api_judge(prompt: str, api_key: str, model: str = "gpt-4o", api_base: 
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.0,
-        "max_tokens": 200,
-    }
+    payload = _build_judge_payload(prompt, model, url)
 
     import requests
 
